@@ -183,8 +183,8 @@ function validateProfile(raw){
     result.fields=raw.fields.map(f=>{
         if(!f||typeof f!=='object'||typeof f.id!=='string'||!f.id||ids.has(f.id))throw Error('Некорректный или повторяющийся ID поля');
         if(['__proto__','constructor','prototype'].includes(f.id))throw Error('Недопустимый ID поля');
-        if(typeof f.tag!=='string'||!/^[\\p{L}\\p{N}_-]+$/u.test(f.tag)||tags.has(f.tag))throw Error('Некорректная или повторяющаяся метка');
-        if(typeof f.item!=='string'||(f.item&&!/^[\\p{L}\\p{N}_-]+$/u.test(f.item)))throw Error('Некорректная метка записи');
+        if(typeof f.tag!=='string'||!/^[\p{L}\p{N}_-]+$/u.test(f.tag)||tags.has(f.tag))throw Error('Некорректная или повторяющаяся метка');
+        if(typeof f.item!=='string'||(f.item&&!/^[\p{L}\p{N}_-]+$/u.test(f.item)))throw Error('Некорректная метка записи');
         if(typeof f.name!=='string'||typeof f.prompt!=='string')throw Error('Отсутствует название или промпт поля');
         ids.add(f.id);tags.add(f.tag);
         return {id:f.id,name:f.name,tag:f.tag,item:f.item,mode:['fresh','persist','event'].includes(f.mode)?f.mode:'fresh',on:f.on!==false,prompt:f.prompt};
