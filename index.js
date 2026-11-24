@@ -24,7 +24,77 @@ function instruction(p,prev){return 'VISUAL METADATA ONLY. Do not advance the st
 function inject(){const c=C(),p=profile();c.setExtensionPrompt?.(ID,enabled()&&p.provider==='active'&&p.together&&p.write?instruction(p,snapshot(c.chat.length-1,p)):'',1,0,false)}
 function button(s,fn){const b=document.createElement('button');b.type='button';b.textContent=s;b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();try{fn(e)}catch(err){console.error('[Visualizer]',err);window.toastr?.error?.(String(err.message??err))}});return b}
 function node(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e}
-function customHtml(html,title,state){const frame=document.createElement('iframe');frame.setAttribute('sandbox','');frame.title=title;frame.style.width='100%';frame.style.height='240px';frame.style.border='0';frame.srcdoc=html.replace(/\{\{title\}\}/g,esc(title)).replace(/\{\{(\w+)\}\}/g,(_,k)=>esc(typeof state[k]==='string'?state[k]:JSON.stringify(state[k]??'')));return frame}
+function customHtml(html,title,state,i,p){
+    const frame=document.createElement('iframe');
+    frame.setAttribute('sandbox','allow-same-origin');
+    frame.title=title;
+    frame.style.cssText='display:block;width:100%;height:1px;border:0';
+    const template=document.createElement('template');
+    template.innerHTML=html.replace(/\{\{title\}\}/g,()=>esc(title)).replace(/\{\{(\w+)\}\}/g,(_,k)=>esc(typeof state[k]==='string'?state[k]:JSON.stringify(state[k]??'')));
+    // No scripts, network resources, inline event handlers or navigations.
+    for(const e of template.content.querySelectorAll('script,iframe,object,embed,link,meta,base,form,svg,math,img,audio,video,source'))e.remove();
+    for(const e of template.content.querySelectorAll('*')){
+        for(const attr of [...e.attributes]){
+            if(/^on/i.test(attr.name)||/^(src|srcset|href|action|formaction|ping|poster|background|srcdoc|xlink:href)$/i.test(attr.name))e.removeAttribute(attr.name);
+        }
+    }
+    const bindings=[];
+    for(const slot of template.content.querySelectorAll('[data-vz-field]')){
+        const f=p.fields.find(x=>x.id===slot.dataset.vzField&&x.on);
+        slot.replaceChildren();
+        if(!f){slot.hidden=true;continue}
+        const entries=f.item?Object.entries(state[f.id]??{}):[[null,state[f.id]]];
+        const key=scope()+'|'+i+'|html|'+f.id;
+        const make=(name,value)=>{
+            const panel=node('div','vz-html-panel');
+            const head=node('div','vz-html-person');
+            head.append(node('span','',name??f.name));
+            const edit=node('button','vz-html-edit','✎');edit.type='button';edit.title='Редактировать';edit.setAttribute('aria-label','Редактировать '+(name??f.name));
+            head.append(edit);panel.append(head,node('p','vz-html-value',value||'Нет установленных сведений'));
+            bindings.push([edit,()=>editField(i,f,state,name??undefined)]);
+            return panel;
+        };
+        if(f.item&&entries.length){
+            const tabs=node('div','vz-html-tabs'),panels=node('div','vz-html-panels');
+            const choices=[];
+            let current=selected.get(key)?.name;
+            if(!entries.some(([n])=>n===current))current=entries[0][0];
+            const activate=name=>{
+                selected.set(key,{name});
+                for(const [n,tab,panel] of choices){tab.setAttribute('aria-selected',String(n===name));panel.hidden=n!==name}
+            };
+            for(const [name,value] of entries){
+                const tab=node('button','vz-html-tab',name);tab.type='button';const panel=make(name,value);
+                tabs.append(tab);panels.append(panel);choices.push([name,tab,panel]);bindings.push([tab,()=>activate(name)]);
+            }
+            activate(current);slot.append(tabs,panels);
+        }else slot.append(make(null,entries[0]?.[1]));
+    }
+    // Attach behavior from the trusted parent only; imported scripts never run.
+    const callbacks=bindings.map(([el,fn],index)=>{el.dataset.vzAction=String(index);return fn});
+    const wrapper=document.createElement('div');wrapper.append(template.content);
+    const csp="default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'";
+    frame.srcdoc='<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="'+csp+'"></head><body style="margin:0">'+wrapper.innerHTML+'</body></html>';
+    frame.addEventListener('load',()=>{
+        const doc=frame.contentDocument;if(!doc||!frame.isConnected)return;
+        const resize=()=>{if(frame.isConnected)frame.style.height=Math.max(1,doc.body.scrollHeight)+'px'};
+        doc.addEventListener('click',e=>{const target=e.target.closest('[data-vz-action]');if(target){e.preventDefault();callbacks[Number(target.dataset.vzAction)]?.();resize()}});
+        // Rebind tab activation to the live document instead of the detached template.
+        for(const slot of doc.querySelectorAll('[data-vz-field]')){
+            const tabs=[...slot.querySelectorAll('.vz-html-tab')],panels=[...slot.querySelectorAll('.vz-html-panel')];
+            tabs.forEach((tab,index)=>tab.addEventListener('click',e=>{
+                e.stopPropagation();
+                selected.set(scope()+'|'+i+'|html|'+slot.dataset.vzField,{name:tab.textContent});
+                tabs.forEach((t,j)=>{t.setAttribute('aria-selected',String(index===j));panels[j].hidden=index!==j});
+                resize();
+            }));
+        }
+        doc.addEventListener('toggle',resize,true);
+        const observer=new ResizeObserver(()=>{if(!frame.isConnected){observer.disconnect();return}resize()});
+        observer.observe(doc.body);resize();
+    },{once:true});
+    return frame;
+}
 function iconButton(icon,label,action){
     const b=button('',action);
     b.className='vz-icon';
@@ -80,15 +150,16 @@ function buildCard(root,i,p,state){
     if(collapsed)return;
     const content=node('div','vz-content');
     if(p.html){
-        content.append(customHtml(p.html,p.title,state));
-        const edits=node('div','vz-chips');
-        for(const f of p.fields.filter(x=>x.on)){
-            const names=f.item?Object.keys(state[f.id]??{}):[];
-            if(names.length){
-                for(const name of names)edits.append(button('✎ '+f.name+' · '+name,()=>editField(i,f,state,name)));
-            }else edits.append(button('✎ '+f.name,()=>editField(i,f,state)));
+        content.append(customHtml(p.html,p.title,state,i,p));
+        if(!p.html.includes('data-vz-field')){
+            const edits=node('div','vz-chips');
+            for(const f of p.fields.filter(x=>x.on)){
+                const names=f.item?Object.keys(state[f.id]??{}):[];
+                if(names.length){for(const name of names)edits.append(button('✎ '+f.name+' · '+name,()=>editField(i,f,state,name)))}
+                else edits.append(button('✎ '+f.name,()=>editField(i,f,state)));
+            }
+            content.append(edits);
         }
-        content.append(edits);
     }else{
         const scene=p.fields.find(f=>f.id==='scene'&&f.on);
         if(scene){
@@ -268,7 +339,7 @@ function settings(){const ctx=C();const chatId=ctx.getCurrentChatId?.();if(!chat
 const add=(parent,label,key,obj,kind,help)=>{const wrap=node('label','vz-setting'),row=node('span','vz-setting-label',label),q=button('?',()=>alert(help));row.append(q);wrap.append(row);const input=document.createElement(kind==='textarea'?'textarea':'input');if(kind==='check'){input.type='checkbox';input.checked=!!obj[key]}else{if(kind!=='textarea')input.type=kind==='password'?'password':'text';input.value=obj[key]??''}input.onchange=()=>{obj[key]=kind==='check'?input.checked:input.value;save();refresh()};wrap.append(input);parent.append(wrap);return input};
 const section=(title)=>{const d=node('details','vz-settings-section');d.open=true;d.append(node('summary','',title));dialog.append(d);return d};
 const a=section('Профиль и оформление');const ps=node('select');for(const n of Object.keys(store().profiles)){const o=node('option','',n);o.value=n;o.selected=n===meta().profile;ps.append(o)}ps.onchange=()=>{meta().profile=ps.value;save();dialog.close();settings();refresh()};a.append(ps,button('+ Профиль',()=>{const n=prompt('Название профиля');if(n&&!Object.hasOwn(store().profiles,n)){store().profiles[n]=clone(p);meta().profile=n;save();dialog.close();settings();refresh()}}));
-a.append(profileActions(dialog,p));add(a,'Название','title',p,'text','Например: Хроники четырёх стихий.');add(a,'Собственный HTML','html',p,'textarea','Пустое поле наследует тему. Пример: <h3>{{title}}</h3><p>{{scene}}</p>. HTML изолирован, скрипты запрещены.');
+a.append(profileActions(dialog,p));add(a,'Название','title',p,'text','Например: Хроники четырёх стихий.');add(a,'Собственный HTML','html',p,'textarea','Пустое поле наследует тему. Пример: <h3>{{title}}</h3><p>{{scene}}</p>. HTML изолирован, скрипты запрещены. Для интерактивного поля: <div data-vz-field="wear"></div>.');
 const b=section('Подключение и метки');const together=add(b,'Отправлять вместе с постом','together',p,'check','Включено: промпт добавляется к ролевому запросу. Выключено: отдельный запрос после поста. Другой профиль подключения требует отдельного запроса.');together.disabled=p.provider!=='active';add(b,'Выводить метки в пост','write',p,'check','Добавляет метки в исходный текст для SP Imagen.');add(b,'Скрывать метки в чате','hide',p,'check','Скрываются только визуально. Расширения, читающие chat[i].mes, продолжают видеть их.');connectionControls(b,p,dialog);if(p.provider==='direct'){add(b,'Endpoint','endpoint',p,'text','Полный URL, например https://example.com/v1/chat/completions');add(b,'Модель','model',p,'text','ID модели, например gpt-4o-mini');const k=node('input');k.type='password';k.placeholder='API-ключ (только это устройство)';k.value=sessionStorage.getItem('vz-key')??'';k.onchange=()=>sessionStorage.setItem('vz-key',k.value);b.append(k);}
 const d=section('Поля и промпты');for(const f of p.fields){const card=node('div','vz-field');add(card,'Активно','on',f,'check','Отключает поле без удаления.');add(card,'Название','name',f,'text','Название вкладки. Например: Предметы.');add(card,'Метка блока','tag',f,'text','Например: ПРЕДМЕТЫ. Без скобок.');add(card,'Метка записи','item',f,'text','Например: ПРЕДМЕТ. Пусто — единая строка.');const mode=node('select');for(const [v,t] of [['fresh','↻ Новый снимок'],['persist','↔ Полное состояние'],['event','+ Только изменения']]){const o=node('option','',t);o.value=v;o.selected=f.mode===v;mode.append(o)}mode.onchange=()=>{f.mode=mode.value;save();refresh()};card.append(mode,button('?',()=>alert('Новый снимок — актуальные позы. Полное состояние — сохраняй одежду до изменения. Только изменения — регистрация NPC.')));add(card,'Промпт','prompt',f,'textarea','Опиши только видимые свойства, например: Track visible held objects.');if(!['scene','wear','npc'].includes(f.id))card.append(button('Удалить',()=>{if(confirm('Удалить поле?')){p.fields=p.fields.filter(x=>x!==f);save();dialog.close();settings();refresh()}}));d.append(card)}d.append(button('+ Добавить поле',()=>{p.fields.push({id:crypto.randomUUID(),name:'Новое поле',tag:'ПОЛЕ_'+p.fields.length,item:'ЗАПИСЬ',mode:'fresh',on:true,prompt:'Track only established visible details.'});save();dialog.close();settings();refresh()}));dialog.append(button('Готово',()=>dialog.close()));dialog.onclose=()=>dialog.remove();document.body.append(dialog);openDialog(dialog)}
 async function separate(){const c=C(),p=profile();if(busy||!enabled()||(p.provider==='active'&&p.together)||!p.write)return;const i=c.chat.length-1,m=c.chat[i];if(!m||m.is_user||m.is_system||Object.keys(parse(m.mes,p)).length)return;const s=scope(),original=m.mes,swipe=m.swipe_id;busy=true;controller=new AbortController();try{const prompt=instruction(p,snapshot(i-1,p))+'\nReturn ONLY metadata for this completed scene.\n'+c.chat.slice(Math.max(0,i-5),i+1).map(x=>x.name+': '+strip(x.mes,p)).join('\n');let result;if(p.provider==='connection'){result=await requestViaProfile(p,prompt,controller.signal)}else if(p.provider==='direct'){const response=await fetch(p.endpoint,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(sessionStorage.getItem('vz-key')??'')},body:JSON.stringify({model:p.model,messages:[{role:'user',content:prompt}]}),signal:controller.signal});if(!response.ok)throw Error('HTTP '+response.status);result=(await response.json()).choices[0].message.content}else{if(!c.generateQuietPrompt)throw Error('Active connection unavailable');result=await c.generateQuietPrompt({quietPrompt:prompt})}if(!enabled()||scope()!==s||C().chat[i]!==m||m.mes!==original||m.swipe_id!==swipe)return;const parsed=parse(result,p),blocks=[];for(const f of p.fields.filter(x=>x.on)){const v=parsed[f.id];if(v===undefined)continue;blocks.push(f.item?'⟦'+f.tag+'⟧\n'+Object.entries(v).map(([n,t])=>'⟦'+f.item+':'+n+'⟧ '+t).join('\n')+'\n⟦/'+f.tag+'⟧':'⟦'+f.tag+'⟧ '+v)}if(!blocks.length)throw Error('No valid metadata');m.mes=original.trimEnd()+'\n\n'+blocks.join('\n');if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=m.mes;await c.saveChat?.();c.updateMessageBlock?.(i,m);refresh()}catch(e){if(e.name!=='AbortError'){console.warn('[Visualizer]',e);notify(String(e.message??e),true)}}finally{busy=false;controller=null}}
