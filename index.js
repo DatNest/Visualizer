@@ -35,7 +35,7 @@ function customHtml(html,title,state,i,p){
     for(const e of template.content.querySelectorAll('script,iframe,object,embed,link,meta,base,form,svg,math,img,audio,video,source'))e.remove();
     for(const e of template.content.querySelectorAll('*')){
         for(const attr of [...e.attributes]){
-            if(/^on/i.test(attr.name)||/^(src|srcset|href|action|formaction|ping|poster|background|srcdoc|xlink:href)$/i.test(attr.name))e.removeAttribute(attr.name);
+            if(attr.name==='data-vz-action'||/^on/i.test(attr.name)||/^(src|srcset|href|action|formaction|ping|poster|background|srcdoc|xlink:href)$/i.test(attr.name))e.removeAttribute(attr.name);
         }
     }
     const bindings=[];
@@ -77,7 +77,7 @@ function customHtml(html,title,state,i,p){
     frame.srcdoc='<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="'+csp+'"></head><body style="margin:0">'+wrapper.innerHTML+'</body></html>';
     frame.addEventListener('load',()=>{
         const doc=frame.contentDocument;if(!doc||!frame.isConnected)return;
-        const resize=()=>{if(frame.isConnected)frame.style.height=Math.max(1,doc.body.scrollHeight)+'px'};
+        const resize=()=>{if(frame.isConnected)frame.style.height=Math.max(1,Math.ceil(doc.body.getBoundingClientRect().height))+'px'};
         doc.addEventListener('click',e=>{const target=e.target.closest('[data-vz-action]');if(target){e.preventDefault();callbacks[Number(target.dataset.vzAction)]?.();resize()}});
         // Rebind tab activation to the live document instead of the detached template.
         for(const slot of doc.querySelectorAll('[data-vz-field]')){
