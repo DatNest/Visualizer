@@ -1,0 +1,11 @@
+{
+  "display_name": "Visualizer",
+  "loading_order": 90,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "DatNest",
+  "version": "0.1.0",
+  "homePage": "https://github.com/DatNest/Visualizer"
+}
