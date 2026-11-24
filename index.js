@@ -9,7 +9,7 @@ const clone=x=>JSON.parse(JSON.stringify(x));
 function store(){const c=C();return c.extensionSettings[ID]??={profiles:{default:defaults()}}}
 function meta(){return C().chatMetadata[ID]??={profile:'default',collapsed:false}}
 function enabled(){return meta().enabled!==false}
-function profile(){return store().profiles[meta().profile]??store().profiles.default}
+function profile(){const profiles=store().profiles;if(!Object.hasOwn(profiles,meta().profile)){meta().profile='default';C().saveMetadata?.()}return profiles[meta().profile]??profiles.default}
 const save=()=>{C().saveSettingsDebounced?.(); C().saveMetadata?.()};
 const esc=s=>String(s??'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
 const rx=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
@@ -216,6 +216,17 @@ function profileActions(dialog,p){
         const url=URL.createObjectURL(blob),link=node('a');
         link.href=url;link.download='visualizer-profile.json';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
     }));
+    const remove=button('Удалить профиль',()=>{
+        const name=meta().profile;
+        if(name==='default'||!Object.hasOwn(store().profiles,name))return;
+        if(!confirm('Удалить профиль «'+name+'»? Чаты, использующие его, перейдут на стандартный профиль. Метки в постах сохранятся.'))return;
+        delete store().profiles[name];
+        meta().profile='default';
+        save();refresh();dialog.close();settings();notify('Профиль удалён');
+    });
+    remove.disabled=meta().profile==='default';
+    remove.title=remove.disabled?'Стандартный профиль нельзя удалить':'Удалить выбранный профиль';
+    actions.append(remove);
     return actions;
 }
 function connectionService(){return C().ConnectionManagerRequestService}
