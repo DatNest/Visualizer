@@ -28,7 +28,8 @@ function customHtml(html,title,state,i,p){
     const frame=document.createElement('iframe');
     frame.setAttribute('sandbox','allow-same-origin');
     frame.title=title;
-    frame.style.cssText='display:block;width:100%;height:1px;border:0';
+    frame.style.cssText='display:block;width:100%;height:1px;border:0;overflow:hidden';
+    frame.setAttribute('scrolling','no');
     const template=document.createElement('template');
     template.innerHTML=html.replace(/\{\{title\}\}/g,()=>esc(title)).replace(/\{\{(\w+)\}\}/g,(_,k)=>esc(typeof state[k]==='string'?state[k]:JSON.stringify(state[k]??'')));
     // No scripts, network resources, inline event handlers or navigations.
@@ -77,7 +78,7 @@ function customHtml(html,title,state,i,p){
     frame.srcdoc='<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="'+csp+'"></head><body style="margin:0">'+wrapper.innerHTML+'</body></html>';
     frame.addEventListener('load',()=>{
         const doc=frame.contentDocument;if(!doc||!frame.isConnected)return;
-        const resize=()=>{if(frame.isConnected)frame.style.height=Math.max(1,Math.ceil(doc.body.getBoundingClientRect().height))+'px'};
+        const resize=()=>{if(frame.isConnected)frame.style.height=Math.max(1,Math.ceil(doc.body.getBoundingClientRect().height + 2))+'px'};
         doc.addEventListener('click',e=>{const target=e.target.closest('[data-vz-action]');if(target){e.preventDefault();callbacks[Number(target.dataset.vzAction)]?.();resize()}});
         // Rebind tab activation to the live document instead of the detached template.
         for(const slot of doc.querySelectorAll('[data-vz-field]')){
@@ -91,7 +92,7 @@ function customHtml(html,title,state,i,p){
         }
         doc.addEventListener('toggle',resize,true);
         const observer=new ResizeObserver(()=>{if(!frame.isConnected){observer.disconnect();return}resize()});
-        observer.observe(doc.body);resize();
+        observer.observe(doc.body);resize();requestAnimationFrame(resize);
     },{once:true});
     return frame;
 }
