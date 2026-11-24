@@ -25,13 +25,142 @@ function inject(){const c=C(),p=profile();c.setExtensionPrompt?.(ID,enabled()&&p
 function button(s,fn){const b=document.createElement('button');b.type='button';b.textContent=s;b.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();try{fn(e)}catch(err){console.error('[Visualizer]',err);window.toastr?.error?.(String(err.message??err))}});return b}
 function node(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e}
 function customHtml(html,title,state){const frame=document.createElement('iframe');frame.setAttribute('sandbox','');frame.title=title;frame.style.width='100%';frame.style.height='240px';frame.style.border='0';frame.srcdoc=html.replace(/\{\{title\}\}/g,esc(title)).replace(/\{\{(\w+)\}\}/g,(_,k)=>esc(typeof state[k]==='string'?state[k]:JSON.stringify(state[k]??'')));return frame}
-function render(){const c=C(),p=profile();document.querySelectorAll('.vz-root').forEach(e=>e.remove());if(!enabled())return;const messages=c.chat;const start=Math.max(0,messages.length-10);if(p.hide){for(const b of document.querySelectorAll('#chat .mes_text'))hideMarkers(b,p)}for(let i=start;i<messages.length;i++){const m=messages[i];if(m.is_user||m.is_system)continue;const body=document.querySelector('.mes[mesid="'+i+'"] .mes_text');if(!body)continue;const own=parse(m.mes,p);if(!Object.keys(own).length)continue;
-
-const state=snapshot(i,p),root=node('section','vz-root'),head=node('div','vz-head'),toggle=button((meta().collapsed?'› ':'⌄ ')+p.title,()=>{meta().collapsed=!meta().collapsed;save();render()});const gear=button('⚙',()=>settings());gear.title='Настройки визуализатора';gear.setAttribute('aria-label',gear.title);head.append(toggle,gear);root.append(head);if(!meta().collapsed){if(p.html){root.append(customHtml(p.html,p.title,state));const edits=node('div','vz-chips');for(const f of p.fields.filter(x=>x.on)){if(f.item&&state[f.id]&&Object.keys(state[f.id]).length){for(const name of Object.keys(state[f.id]))edits.append(button('✎ '+f.name+' · '+name,()=>editField(i,f,state,name)))}else edits.append(button('✎ '+f.name,()=>editField(i,f,state)))}root.append(edits)}else{const f=p.fields.find(x=>x.id==='scene'&&x.on);if(f){root.append(fieldHeading(f.name,()=>editField(i,f,state)),node('p','vz-scene',state[f.id]??'—'))}const fields=p.fields.filter(x=>x.on&&x.id!=='scene');if(fields.length){const key=scope()+'|'+i,sel=selected.get(key)??{},field=fields.find(x=>x.id===sel.field)??fields[0];const tabs=node('div','vz-tabs');for(const x of fields){const b=button(x.name,()=>{selected.set(key,{field:x.id});render()});b.classList.toggle('vz-active',x===field);tabs.append(b)}root.append(tabs);const val=state[field.id];if(val&&typeof val==='object'){const names=Object.keys(val),name=names.includes(sel.name)?sel.name:names[0],chips=node('div','vz-chips');for(const n of names){const b=button(n,()=>{selected.set(key,{field:field.id,name:n});render()});b.classList.toggle('vz-active',n===name);chips.append(b)}root.append(chips,fieldHeading(name??field.name,()=>editField(i,field,state,name)),node('div','vz-value',val[name]||'Нет установленных сведений'))}else root.append(fieldHeading(field.name,()=>editField(i,field,state)),node('div','vz-value',val||'Нет установленных сведений'))}}}body.append(root)}}
+function iconButton(icon,label,action){
+    const b=button('',action);
+    b.className='vz-icon';
+    b.title=label;
+    b.setAttribute('aria-label',label);
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    svg.setAttribute('viewBox','0 0 24 24');
+    svg.setAttribute('fill','none');
+    svg.setAttribute('stroke','currentColor');
+    svg.setAttribute('stroke-width','1.6');
+    svg.setAttribute('stroke-linecap','round');
+    svg.setAttribute('stroke-linejoin','round');
+    svg.setAttribute('aria-hidden','true');
+    const paths={
+        chevron:'M9 5l7 7-7 7',
+        settings:'M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z M9.4 3.5h5.2l.7 2.4 2.2 1.3 2.4-.6 2.6 4.5-1.7 1.8v2.5l1.7 1.8-2.6 4.5-2.4-.6-2.2 1.3-.7 2.4H9.4l-.7-2.4-2.2-1.3-2.4.6-2.6-4.5 1.7-1.8v-2.5L1.5 11l2.6-4.5 2.4.6 2.2-1.3z',
+        pencil:'M14.5 5.5l4 4M4 20l4.5-1 12-12a1.4 1.4 0 0 0 0-2l-2.5-2.5a1.4 1.4 0 0 0-2 0l-12 12L4 20z',
+        sliders:'M4 7h16M4 17h16M9 4v6M15 14v6'
+    };
+    const path=document.createElementNS(svg.namespaceURI,'path');
+    path.setAttribute('d',paths[icon]??paths.sliders);
+    svg.append(path);
+    b.append(svg);
+    return b;
+}
+function choice(label,active,action){
+    const b=button(label,action);
+    b.className='vz-choice';
+    b.setAttribute('aria-pressed',String(active));
+    return b;
+}
+function buildCard(root,i,p,state){
+    root.replaceChildren();
+    const collapsed=!!meta().collapsed;
+    root.classList.toggle('vz-collapsed',collapsed);
+    const head=node('header','vz-card-head');
+    const toggle=button('',()=>{
+        meta().collapsed=!meta().collapsed;
+        save();
+        for(const card of document.querySelectorAll('.vz-root')){
+            const index=Number(card.dataset.vzMessage);
+            buildCard(card,index,p,snapshot(index,p));
+        }
+    });
+    toggle.className='vz-collapse';
+    toggle.setAttribute('aria-expanded',String(!collapsed));
+    const chevron=iconButton('chevron','',()=>{}).firstElementChild;
+    chevron.classList.add('vz-chevron');
+    toggle.append(chevron,node('span','vz-title',p.title||'Визуализатор'));
+    const gear=iconButton('sliders','Настройки визуализатора',settings);
+    head.append(toggle,gear);
+    root.append(head);
+    if(collapsed)return;
+    const content=node('div','vz-content');
+    if(p.html){
+        content.append(customHtml(p.html,p.title,state));
+        const edits=node('div','vz-chips');
+        for(const f of p.fields.filter(x=>x.on)){
+            const names=f.item?Object.keys(state[f.id]??{}):[];
+            if(names.length){
+                for(const name of names)edits.append(button('✎ '+f.name+' · '+name,()=>editField(i,f,state,name)));
+            }else edits.append(button('✎ '+f.name,()=>editField(i,f,state)));
+        }
+        content.append(edits);
+    }else{
+        const scene=p.fields.find(f=>f.id==='scene'&&f.on);
+        if(scene){
+            const section=node('section','vz-scene-section');
+            section.append(fieldHeading(scene.name,()=>editField(i,scene,state)),node('p','vz-scene',state[scene.id]??'—'));
+            content.append(section);
+        }
+        const fields=p.fields.filter(f=>f.on&&f.id!=='scene');
+        if(fields.length){
+            const section=node('section','vz-fields-section');
+            const key=scope()+'|'+i;
+            const sel=selected.get(key)??{};
+            const field=fields.find(f=>f.id===sel.field)??fields[0];
+            const tabs=node('div','vz-tabs');
+            for(const f of fields){
+                tabs.append(choice(f.name,f===field,()=>{
+                    selected.set(key,{field:f.id});
+                    buildCard(root,i,p,state);
+                }));
+            }
+            section.append(tabs);
+            const detail=node('div','vz-detail');
+            const val=state[field.id];
+            if(field.item){
+                const names=Object.keys(val??{});
+                const name=names.includes(sel.name)?sel.name:names[0];
+                if(names.length){
+                    const chips=node('div','vz-chips');
+                    for(const n of names){
+                        chips.append(choice(n,n===name,()=>{
+                            selected.set(key,{field:field.id,name:n});
+                            buildCard(root,i,p,state);
+                        }));
+                    }
+                    detail.append(chips);
+                }
+                detail.append(fieldHeading(name??field.name,()=>editField(i,field,state,name)),
+                    node('div','vz-value',val?.[name]||'Нет установленных сведений'));
+            }else{
+                detail.append(fieldHeading(field.name,()=>editField(i,field,state)),
+                    node('div','vz-value',val||'Нет установленных сведений'));
+            }
+            section.append(detail);
+            content.append(section);
+        }
+    }
+    root.append(content);
+}
+function render(){
+    const c=C(),p=profile();
+    document.querySelectorAll('.vz-root').forEach(e=>e.remove());
+    if(!enabled())return;
+    const messages=c.chat;
+    const start=Math.max(0,messages.length-10);
+    if(p.hide){
+        for(const b of document.querySelectorAll('#chat .mes_text'))hideMarkers(b,p);
+    }
+    for(let i=start;i<messages.length;i++){
+        const m=messages[i];
+        if(m.is_user||m.is_system)continue;
+        const body=document.querySelector('.mes[mesid="'+i+'"] .mes_text');
+        if(!body||!Object.keys(parse(m.mes,p)).length)continue;
+        const root=node('section','vz-root');
+        root.dataset.vzMessage=String(i);
+        buildCard(root,i,p,snapshot(i,p));
+        body.append(root);
+    }
+}
 function hideMarkers(body,p){const tags=new Set(p.fields.flatMap(f=>[f.tag,f.item]).filter(Boolean));const walker=document.createTreeWalker(body,NodeFilter.SHOW_TEXT);const groups=[];let n;while(n=walker.nextNode()){if(n.parentElement?.closest('script,style,textarea,pre,code,.vz-root,.vz-hidden,.vz-marker'))continue;groups.push(n)}for(const t of groups){const parts=t.nodeValue.split(/(⟦[^⟧\r\n]+⟧[^\r\n]*)/g);if(parts.length<2)continue;const frag=document.createDocumentFragment();for(const part of parts){const match=/^⟦\/?([^:⟧]+)(?::[^⟧]+)?⟧/.exec(part);if(match&&tags.has(match[1])){const span=node('span','vz-marker');span.textContent=part;span.hidden=true;frag.append(span)}else frag.append(document.createTextNode(part))}t.replaceWith(frag)}}
 function refresh(){if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;document.querySelectorAll('.vz-marker').forEach(n=>n.replaceWith(document.createTextNode(n.textContent)));document.querySelectorAll('.vz-hidden').forEach(n=>n.classList.remove('vz-hidden'));render();inject();syncMenu()})}
 function openDialog(d){d.addEventListener('click',e=>e.stopPropagation());try{d.showModal()}catch(e){d.setAttribute('open','');d.classList.add('vz-dialog-fallback')}d.focus()}
-function pencil(fn){const b=button('✎',fn);b.className='vz-pencil';b.title='Редактировать поле';b.setAttribute('aria-label',b.title);return b}
+function pencil(fn){return iconButton('pencil','Редактировать поле',fn)}
 function fieldHeading(label,fn){const h=node('div','vz-field-heading');h.append(node('span','',label),pencil(fn));return h}
 function editField(i,f,state,name){if(running||busy){window.toastr?.warning?.('Дождись завершения генерации');return}const c=C(),m=c.chat[i],chat=scope(),original=m.mes,swipe=m.swipe_id,p=profile(),fieldSignature=JSON.stringify(f);document.querySelector('.vz-modal')?.remove();const d=node('dialog','vz-modal vz-editor');const h=node('div','vz-head');h.append(node('strong','',f.name+(name?' · '+name:'')),button('×',()=>d.close()));d.append(h);const note=node('p','vz-editor-note','Изменяется только служебная метка этого поста. Ролевой текст остаётся прежним.');d.append(note);const existing=f.item?state[f.id]?.[name]:state[f.id];let nameInput;if(f.item&&!name){nameInput=node('input');nameInput.placeholder='Имя персонажа или записи';d.append(nameInput)}const input=node('textarea');input.value=existing??'';input.rows=6;input.setAttribute('aria-label',f.name);d.append(input);const footer=node('div','vz-editor-actions');const submit=button('Сохранить',async()=>{if(running||busy||scope()!==chat||C().chat[i]!==m||m.mes!==original||m.swipe_id!==swipe||profile()!==p||JSON.stringify(f)!==fieldSignature){window.toastr?.warning?.('Пост или настройки изменились. Открой редактор заново.');return}const value=input.value.replace(/[\r\n]+/g,' ').trim();const n=name??nameInput?.value.trim();if(/[⟦⟧]/.test(value)||(f.item&&(!n||/[\r\n⟦⟧]/.test(n)))){window.toastr?.error?.('Проверь имя и текст: служебные скобки недопустимы.');return}const own=parse(original,p);let v=value;if(f.item){v={...(f.mode==='event'?own[f.id]:state[f.id]),[n]:value}}const block=f.item?'⟦'+f.tag+'⟧\n'+Object.entries(v).map(([k,t])=>'⟦'+f.item+':'+k+'⟧ '+t).join('\n')+'\n⟦/'+f.tag+'⟧':'⟦'+f.tag+'⟧ '+v;const pattern=f.item?'^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n[\\s\\S]*?^⟦/'+rx(f.tag)+'⟧[ \\t]*$':'^⟦'+rx(f.tag)+'⟧[^\\r\\n]*$';const re=new RegExp(pattern,'m');const next=re.test(original)?original.replace(re,()=>block):original.trimEnd()+'\n\n'+block;submit.disabled=true;try{m.mes=next;if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=next;if(!c.saveChat)throw Error('SillyTavern saveChat недоступен');await c.saveChat();if(scope()===chat&&C().chat[i]===m){c.updateMessageBlock?.(i,m);refresh()}d.close()}catch(err){m.mes=original;if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=original;submit.disabled=false;window.toastr?.error?.(String(err.message??err));console.error('[Visualizer]',err)}});footer.append(button('Отмена',()=>d.close()),submit);d.append(footer);d.onclose=()=>d.remove();document.body.append(d);openDialog(d);input.focus()}
 function settings(){const ctx=C();const chatId=ctx.getCurrentChatId?.();if(!chatId||!Array.isArray(ctx.chat)){const msg='Откройте чат, чтобы активировать настройки';if(window.toastr?.info)window.toastr.info(msg);else alert(msg);return}document.querySelector('.vz-modal')?.remove();const dialog=node('dialog','vz-modal'),p=profile();const h=node('div','vz-head');h.append(node('strong','','Настройки'),button('×',()=>dialog.close()));dialog.append(h);
