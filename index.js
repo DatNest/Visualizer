@@ -18,19 +18,50 @@ let running=false, busy=false, controller=null, scheduled=false;
 const selected=new Map();
 const expandedChats=new Set();
 const cached=new WeakMap();
+const renderedCards=new WeakMap();
+const markerBodies=new WeakMap();
+let renderRevision=0;
 function parse(text,p){let out={};for(const f of p.fields){if(!f.item){const m=new RegExp('^⟦'+rx(f.tag)+'⟧[ \\t]*(.*)$','m').exec(text);if(m)out[f.id]=m[1];continue}const b=new RegExp('^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n([\\s\\S]*?)^⟦/'+rx(f.tag)+'⟧[ \\t]*$','m').exec(text);if(b){out[f.id]=Object.fromEntries([...b[1].matchAll(new RegExp('^⟦'+rx(f.item)+':([^⟧\\r\\n]+)⟧[ \\t]*(.*)$','gm'))].map(m=>[m[1].trim(),m[2]]));}}return out}
 function strip(text,p){for(const f of p.fields){const pattern=f.item?'^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n[\\s\\S]*?^⟦/'+rx(f.tag)+'⟧[ \\t]*$':'^⟦'+rx(f.tag)+'⟧[^\\r\\n]*$';text=text.replace(new RegExp(pattern,'gm'),'')}return text.trimEnd()}
-function snapshot(end,p){const state={};for(let i=0;i<=end;i++){const m=C().chat[i];if(!m||m.is_user||m.is_system)continue;const signature=JSON.stringify(p.fields.map(f=>[f.id,f.tag,f.item]));let entry=cached.get(m);if(!entry||entry.text!==m.mes||entry.signature!==signature){entry={text:m.mes,signature,data:parse(m.mes,p)};cached.set(m,entry)}const data=entry.data;for(const f of p.fields){if(data[f.id]===undefined)continue;state[f.id]=f.mode==='event'?{...state[f.id],...data[f.id]}:data[f.id]}}return state}
+function fieldSignature(p){
+    return JSON.stringify(p.fields.map(f=>[f.id,f.tag,f.item]));
+}
+function parsedMessage(m,p,signature){
+    if(!m||typeof m.mes!=='string'||m.is_user||m.is_system)return {};
+    let entry=cached.get(m);
+    if(!entry||entry.text!==m.mes||entry.signature!==signature){
+        entry={text:m.mes,signature,data:m.mes.includes('⟦')?parse(m.mes,p):{}};
+        cached.set(m,entry);
+    }
+    return entry.data;
+}
+function snapshotsAt(indices,p,messages=C().chat){
+    const result=new Map();
+    if(!indices.length)return result;
+    const wanted=new Set(indices),end=Math.min(Math.max(...indices),messages.length-1);
+    const signature=fieldSignature(p);
+    const state={};
+    for(let i=0;i<=end;i++){
+        const data=parsedMessage(messages[i],p,signature);
+        for(const f of p.fields){
+            if(!Object.hasOwn(data,f.id))continue;
+            state[f.id]=f.mode==='event'?{...state[f.id],...data[f.id]}:data[f.id];
+        }
+        if(wanted.has(i))result.set(i,{...state});
+    }
+    return result;
+}
+function snapshot(end,p){return snapshotsAt([end],p).get(end)??{}}
 function recentSnapshots(end,p){
-    const indices=[];
-    for(let i=end;i>=0&&indices.length<3;i--){
-        const m=C().chat[i];
-        if(!m||m.is_user||m.is_system)continue;
-        const data=parse(m.mes,p);
+    const messages=C().chat,signature=fieldSignature(p),indices=[];
+    for(let i=Math.min(end,messages.length-1);i>=0&&indices.length<3;i--){
+        const data=parsedMessage(messages[i],p,signature);
         if(p.fields.some(f=>f.on&&Object.hasOwn(data,f.id)))indices.push(i);
     }
-    return indices.reverse().map(i=>{
-        const state=snapshot(i,p);
+    indices.reverse();
+    const states=snapshotsAt(indices,p,messages);
+    return indices.map(i=>{
+        const state=states.get(i)??{};
         return Object.fromEntries(p.fields.filter(f=>f.on&&Object.hasOwn(state,f.id)).map(f=>[f.id,state[f.id]]));
     });
 }
@@ -165,10 +196,7 @@ function buildCard(root,i,p,state){
     const toggle=button('',()=>{
         if(expandedChats.has(chatKey))expandedChats.delete(chatKey);
         else expandedChats.add(chatKey);
-        for(const card of document.querySelectorAll('.vz-root')){
-            const index=Number(card.dataset.vzMessage);
-            buildCard(card,index,p);
-        }
+        render();
     });
     toggle.className='vz-collapse';
     toggle.setAttribute('aria-expanded',String(!collapsed));
@@ -240,28 +268,86 @@ function buildCard(root,i,p,state){
     }
     root.append(content);
 }
-function render(){
-    const c=C(),p=profile();
-    document.querySelectorAll('.vz-root').forEach(e=>e.remove());
-    if(!enabled())return;
-    const messages=c.chat;
-    const start=Math.max(0,messages.length-10);
-    if(p.hide){
-        for(const b of document.querySelectorAll('#chat .mes_text'))hideMarkers(b,p);
+function restoreMarkers(body){
+    for(const n of body.querySelectorAll('.vz-marker'))n.replaceWith(document.createTextNode(n.textContent));
+    for(const n of body.querySelectorAll('.vz-hidden'))n.classList.remove('vz-hidden');
+}
+function hideMarkers(body,tags){
+    const walker=document.createTreeWalker(body,NodeFilter.SHOW_TEXT);
+    const groups=[];let n;
+    while(n=walker.nextNode()){
+        if(!n.nodeValue.includes('⟦')||n.parentElement?.closest('script,style,textarea,pre,code,.vz-root,.vz-hidden,.vz-marker'))continue;
+        groups.push(n);
     }
-    for(let i=start;i<messages.length;i++){
+    const markers=[];
+    for(const t of groups){
+        const parts=t.nodeValue.split(/(⟦[^⟧\r\n]+⟧[^\r\n]*)/g);
+        if(parts.length<2)continue;
+        const frag=document.createDocumentFragment();
+        for(const part of parts){
+            const match=/^⟦\/?([^:⟧]+)(?::[^⟧]+)?⟧/.exec(part);
+            if(match&&tags.has(match[1])){
+                const span=node('span','vz-marker');span.textContent=part;span.hidden=true;
+                markers.push(span);frag.append(span);
+            }else frag.append(document.createTextNode(part));
+        }
+        t.replaceWith(frag);
+    }
+    return markers;
+}
+function syncMarkers(body,m,hide,tags,signature){
+    const old=markerBodies.get(body);
+    const raw=m?.mes??'';
+    if(!hide||!raw.includes('⟦')){
+        if(old||body.querySelector('.vz-marker,.vz-hidden'))restoreMarkers(body);
+        markerBodies.delete(body);
+        return;
+    }
+    if(old&&old.raw===raw&&old.signature===signature&&old.first===body.firstChild&&old.markers.every(n=>body.contains(n)))return;
+    restoreMarkers(body);
+    const markers=hideMarkers(body,tags);
+    markerBodies.set(body,{raw,signature,first:body.firstChild,markers});
+}
+function render(){
+    const c=C(),p=profile(),messages=c.chat,chatKey=scope(),active=enabled();
+    const collapsed=!expandedChats.has(chatKey);
+    const signature=fieldSignature(p),tags=new Set(p.fields.flatMap(f=>[f.tag,f.item]).filter(Boolean));
+    const presentation=JSON.stringify([p.title,p.html,p.fields.map(f=>[f.id,f.name,f.mode,f.on])]);
+    const start=Math.max(0,messages.length-10),pending=[];
+    for(const body of document.querySelectorAll('#chat .mes[mesid] .mes_text')){
+        const i=Number(body.closest('.mes[mesid]')?.getAttribute('mesid'));
         const m=messages[i];
-        if(m.is_user||m.is_system)continue;
-        const body=document.querySelector('.mes[mesid="'+i+'"] .mes_text');
-        if(!body||!Object.keys(parse(m.mes,p)).length)continue;
-        const root=node('section','vz-root');
+        syncMarkers(body,m,active&&p.hide,tags,signature);
+        const existing=body.querySelector(':scope > .vz-root');
+        if(!active||i<start||!m||m.is_user||m.is_system||!Object.keys(parsedMessage(m,p,signature)).length){
+            existing?.remove();continue;
+        }
+        const root=existing??node('section','vz-root');
+        const old=renderedCards.get(root);
+        const key=JSON.stringify([chatKey,i,collapsed,signature,presentation,collapsed?0:renderRevision]);
+        if(old?.key===key&&old.raw===m.mes)continue;
+        pending.push({root,body,i,key,raw:m.mes});
+    }
+    const states=collapsed?new Map():snapshotsAt(pending.map(x=>x.i),p,messages);
+    for(const {root,body,i,key,raw} of pending){
         root.dataset.vzMessage=String(i);
-        buildCard(root,i,p);
-        body.append(root);
+        buildCard(root,i,p,states.get(i));
+        renderedCards.set(root,{key,raw});
+        if(root.parentNode!==body)body.append(root);
     }
 }
-function hideMarkers(body,p){const tags=new Set(p.fields.flatMap(f=>[f.tag,f.item]).filter(Boolean));const walker=document.createTreeWalker(body,NodeFilter.SHOW_TEXT);const groups=[];let n;while(n=walker.nextNode()){if(n.parentElement?.closest('script,style,textarea,pre,code,.vz-root,.vz-hidden,.vz-marker'))continue;groups.push(n)}for(const t of groups){const parts=t.nodeValue.split(/(⟦[^⟧\r\n]+⟧[^\r\n]*)/g);if(parts.length<2)continue;const frag=document.createDocumentFragment();for(const part of parts){const match=/^⟦\/?([^:⟧]+)(?::[^⟧]+)?⟧/.exec(part);if(match&&tags.has(match[1])){const span=node('span','vz-marker');span.textContent=part;span.hidden=true;frag.append(span)}else frag.append(document.createTextNode(part))}t.replaceWith(frag)}}
-function refresh(){if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;document.querySelectorAll('.vz-marker').forEach(n=>n.replaceWith(document.createTextNode(n.textContent)));document.querySelectorAll('.vz-hidden').forEach(n=>n.classList.remove('vz-hidden'));render();inject();syncMenu()})}
+function refresh(){
+    if(scheduled)return;
+    scheduled=true;
+    requestAnimationFrame(()=>{
+        scheduled=false;
+        renderRevision++;
+        // The generation hook prepares the prompt before SillyTavern assembles its request.
+        // Do not walk the entire history just to display a chat.
+        if(!running)C().setExtensionPrompt?.(ID,'',1,0,false);
+        render();syncMenu();
+    });
+}
 function openDialog(d){d.addEventListener('click',e=>e.stopPropagation());try{d.showModal()}catch(e){d.setAttribute('open','');d.classList.add('vz-dialog-fallback')}d.focus()}
 function pencil(fn){return iconButton('pencil','Редактировать поле',fn)}
 function fieldHeading(label,fn){const h=node('div','vz-field-heading');h.append(node('span','',label),pencil(fn));return h}
