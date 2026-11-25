@@ -66,7 +66,7 @@
 .vz-detail {padding:12px;border-radius:10px;background:var(--vz-soft);min-width:0}
 .vz-value {margin:5px 0 0;line-height:1.65;overflow-wrap:anywhere;font-weight:400}
 .vz-root iframe {display:block}
-.vz-hidden,.vz-marker[hidden] {display:none!important}
+.vz-hidden,.vz-marker[hidden],.vz-marker-gap {display:none!important}
 .vz-modal {
     position:fixed;inset:0;margin:auto;z-index:2147483000;pointer-events:auto;
     width:min(680px,94vw);max-height:88vh;overflow:auto;padding:16px;
