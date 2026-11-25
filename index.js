@@ -7,7 +7,7 @@ const defaults=()=>({title:'Визуализатор', enabled:true, together:tr
 {id:'npc',name:'НПС',tag:'ВНЕШНОСТЬ',item:'ВНЕШНОСТЬ',mode:'event',on:true,prompt:'Register only eligible secondary NPCs with new or corrected permanent visual facts. Exclude primary characters and anyone with an independent appearance profile. Never duplicate aliases or unchanged records. English visual tags, Russian nominative name. For canon use 1boy/1girl Name (Fandom), tags; original use 1boy/1girl original character, tags. Exclude clothes and temporary state. Omit block if no update.'}]});
 const clone=x=>JSON.parse(JSON.stringify(x));
 function store(){const c=C();return c.extensionSettings[ID]??={profiles:{default:defaults()}}}
-function meta(){return C().chatMetadata[ID]??={profile:'default',collapsed:false}}
+function meta(){return C().chatMetadata[ID]??={profile:'default'}}
 function enabled(){return meta().enabled!==false}
 function profile(){const profiles=store().profiles;if(!Object.hasOwn(profiles,meta().profile)){meta().profile='default';C().saveMetadata?.()}return profiles[meta().profile]??profiles.default}
 const save=()=>{C().saveSettingsDebounced?.(); C().saveMetadata?.()};
@@ -16,6 +16,7 @@ const rx=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
 const scope=()=>String(C().groupId??C().characterId)+'|'+String(C().getCurrentChatId?.()??'');
 let running=false, busy=false, controller=null, scheduled=false;
 const selected=new Map();
+const expandedChats=new Set();
 const cached=new WeakMap();
 function parse(text,p){let out={};for(const f of p.fields){if(!f.item){const m=new RegExp('^⟦'+rx(f.tag)+'⟧[ \\t]*(.*)$','m').exec(text);if(m)out[f.id]=m[1];continue}const b=new RegExp('^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n([\\s\\S]*?)^⟦/'+rx(f.tag)+'⟧[ \\t]*$','m').exec(text);if(b){out[f.id]=Object.fromEntries([...b[1].matchAll(new RegExp('^⟦'+rx(f.item)+':([^⟧\\r\\n]+)⟧[ \\t]*(.*)$','gm'))].map(m=>[m[1].trim(),m[2]]));}}return out}
 function strip(text,p){for(const f of p.fields){const pattern=f.item?'^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n[\\s\\S]*?^⟦/'+rx(f.tag)+'⟧[ \\t]*$':'^⟦'+rx(f.tag)+'⟧[^\\r\\n]*$';text=text.replace(new RegExp(pattern,'gm'),'')}return text.trimEnd()}
@@ -157,15 +158,16 @@ function choice(label,active,action){
 }
 function buildCard(root,i,p,state){
     root.replaceChildren();
-    const collapsed=!!meta().collapsed;
+    const chatKey=scope();
+    const collapsed=!expandedChats.has(chatKey);
     root.classList.toggle('vz-collapsed',collapsed);
     const head=node('header','vz-card-head');
     const toggle=button('',()=>{
-        meta().collapsed=!meta().collapsed;
-        save();
+        if(expandedChats.has(chatKey))expandedChats.delete(chatKey);
+        else expandedChats.add(chatKey);
         for(const card of document.querySelectorAll('.vz-root')){
             const index=Number(card.dataset.vzMessage);
-            buildCard(card,index,p,snapshot(index,p));
+            buildCard(card,index,p);
         }
     });
     toggle.className='vz-collapse';
@@ -177,6 +179,7 @@ function buildCard(root,i,p,state){
     head.append(toggle,gear);
     root.append(head);
     if(collapsed)return;
+    state??=snapshot(i,p);
     const content=node('div','vz-content');
     if(p.html){
         content.append(customHtml(p.html,p.title,state,i,p));
@@ -253,7 +256,7 @@ function render(){
         if(!body||!Object.keys(parse(m.mes,p)).length)continue;
         const root=node('section','vz-root');
         root.dataset.vzMessage=String(i);
-        buildCard(root,i,p,snapshot(i,p));
+        buildCard(root,i,p);
         body.append(root);
     }
 }
