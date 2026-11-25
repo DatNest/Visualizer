@@ -270,7 +270,80 @@ function buildCard(root,i,p,state){
 }
 function restoreMarkers(body){
     for(const n of body.querySelectorAll('.vz-marker'))n.replaceWith(document.createTextNode(n.textContent));
-    for(const n of body.querySelectorAll('.vz-hidden'))n.classList.remove('vz-hidden');
+    for(const n of body.querySelectorAll('.vz-marker-gap,.vz-hidden'))n.classList.remove('vz-marker-gap','vz-hidden');
+}
+function compactMarkerGaps(body,markers){
+    // Only touch blank layout belonging to marker lines. Never remove story text or widgets.
+    const blockSelector='p,div,blockquote,li';
+    const inlineSelector='span,b,strong,i,em,u,s,del,mark,small,sub,sup,font,abbr';
+    const candidates=new Set();
+    for(const marker of markers){
+        let parent=marker.parentElement;
+        while(parent&&parent!==body){
+            if(parent.matches(blockSelector))candidates.add(parent);
+            parent=parent.parentElement;
+        }
+    }
+    candidates.add(body);
+    const gaps=[];
+    const hide=e=>{
+        if(e===body||e.classList.contains('vz-marker-gap'))return;
+        e.classList.add('vz-marker-gap');gaps.push(e);
+    };
+    function linesOf(container){
+        const lines=[{marker:false,visible:false,br:null}];
+        const line=()=>lines[lines.length-1];
+        function visit(n){
+            if(n.nodeType===Node.TEXT_NODE){
+                if(n.nodeValue.trim())line().visible=true;
+                return;
+            }
+            if(n.nodeType!==Node.ELEMENT_NODE)return;
+            if(n.matches('.vz-marker,.vz-marker-gap')){
+                line().marker=true;return;
+            }
+            if(n.matches('br')){
+                line().br=n;lines.push({marker:false,visible:false,br:null});return;
+            }
+            if(n.matches(inlineSelector)){
+                for(const child of n.childNodes)visit(child);
+                return;
+            }
+            // Other elements may contain UI or visible block content.
+            line().visible=true;
+        }
+        for(const n of container.childNodes)visit(n);
+        return lines;
+    }
+    function compact(container){
+        const lines=linesOf(container);
+        if(!lines.some(l=>l.marker))return;
+        if(container!==body&&lines.every(l=>!l.visible)){
+            hide(container);return;
+        }
+        for(let i=0;i<lines.length;){
+            if(lines[i].visible){i++;continue}
+            const start=i;
+            while(i<lines.length&&!lines[i].visible)i++;
+            if(!lines.slice(start,i).some(l=>l.marker))continue;
+            for(let j=start;j<i;j++)if(lines[j].br)hide(lines[j].br);
+            if(i===lines.length&&start>0&&lines[start-1].br)hide(lines[start-1].br);
+        }
+    }
+    const depth=e=>{let n=0;for(let p=e;p&&p!==body;p=p.parentElement)n++;return n};
+    for(const container of [...candidates].sort((a,b)=>depth(b)-depth(a)))compact(container);
+    // Markdown may insert standalone empty paragraphs next to a hidden metadata block.
+    const blankParagraph=e=>e?.matches('p')&&!e.textContent.trim()&&[...e.querySelectorAll('*')].every(n=>n.matches('br,'+inlineSelector));
+    for(const e of gaps.slice()){
+        if(!e.matches(blockSelector))continue;
+        for(const direction of ['previousElementSibling','nextElementSibling']){
+            let sibling=e[direction];
+            while(sibling&&(sibling.matches('.vz-marker-gap,br')||blankParagraph(sibling))){
+                hide(sibling);sibling=sibling[direction];
+            }
+        }
+    }
+    return gaps;
 }
 function hideMarkers(body,tags){
     const walker=document.createTreeWalker(body,NodeFilter.SHOW_TEXT);
@@ -293,13 +366,13 @@ function hideMarkers(body,tags){
         }
         t.replaceWith(frag);
     }
-    return markers;
+    return markers.concat(compactMarkerGaps(body,markers));
 }
 function syncMarkers(body,m,hide,tags,signature){
     const old=markerBodies.get(body);
     const raw=m?.mes??'';
     if(!hide||!raw.includes('⟦')){
-        if(old||body.querySelector('.vz-marker,.vz-hidden'))restoreMarkers(body);
+        if(old||body.querySelector('.vz-marker,.vz-marker-gap,.vz-hidden'))restoreMarkers(body);
         markerBodies.delete(body);
         return;
     }
