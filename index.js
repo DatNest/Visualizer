@@ -21,8 +21,57 @@ const cached=new WeakMap();
 const renderedCards=new WeakMap();
 const markerBodies=new WeakMap();
 let renderRevision=0;
-function parse(text,p){let out={};for(const f of p.fields){if(!f.item){const m=new RegExp('^⟦'+rx(f.tag)+'⟧[ \\t]*(.*)$','m').exec(text);if(m)out[f.id]=m[1];continue}const b=new RegExp('^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n([\\s\\S]*?)^⟦/'+rx(f.tag)+'⟧[ \\t]*$','m').exec(text);if(b){out[f.id]=Object.fromEntries([...b[1].matchAll(new RegExp('^⟦'+rx(f.item)+':([^⟧\\r\\n]+)⟧[ \\t]*(.*)$','gm'))].map(m=>[m[1].trim(),m[2]]));}}return out}
-function strip(text,p){for(const f of p.fields){const pattern=f.item?'^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n[\\s\\S]*?^⟦/'+rx(f.tag)+'⟧[ \\t]*$':'^⟦'+rx(f.tag)+'⟧[^\\r\\n]*$';text=text.replace(new RegExp(pattern,'gm'),'')}return text.trimEnd()}
+// The raw message is the source of truth. All readers and writers share these boundaries.
+function fieldRanges(text,f){
+    const tag=rx(f.tag);
+    const source=f.item
+        ? '^[ \\t]*⟦'+tag+'⟧[ \\t]*\\r?\\n([\\s\\S]*?)^[ \\t]*⟦/'+tag+'⟧[ \\t]*(?=\\r?$)'
+        : '^[ \\t]*⟦'+tag+'⟧[ \\t]*([^\\r\\n]*)(?=\\r?$)';
+    return [...text.matchAll(new RegExp(source,'gm'))];
+}
+function parse(text,p){
+    const out=Object.create(null);
+    if(typeof text!=='string'||!text.includes('⟦'))return out;
+    for(const f of p.fields){
+        for(const match of fieldRanges(text,f)){
+            if(!f.item){out[f.id]=match[1].trim();continue}
+            const entries=Object.create(null);
+            const pattern=new RegExp('^[ \\t]*⟦'+rx(f.item)+':([^⟧\\r\\n]+)⟧[ \\t]*([^\\r\\n]*)','gm');
+            const rows=[...match[1].matchAll(pattern)];
+            for(let i=0;i<rows.length;i++){
+                const row=rows[i],name=row[1].trim();
+                if(!name)continue;
+                const tail=match[1].slice(row.index+row[0].length,rows[i+1]?.index??match[1].length);
+                const continuation=tail.split(/\r?\n/).filter(line=>!line.trimStart().startsWith('⟦')).join(' ');
+                entries[name]=(row[2]+continuation).replace(/\s+/g,' ').trim();
+            }
+            // A malformed nonempty block must not erase previously known state.
+            if(rows.length||!match[1].trim())out[f.id]=entries;
+        }
+    }
+    return out;
+}
+function strip(text,p){
+    const ranges=p.fields.flatMap(f=>fieldRanges(text,f)).sort((a,b)=>b.index-a.index);
+    let boundary=text.length;
+    for(const m of ranges){
+        const end=m.index+m[0].length;
+        if(end>boundary)continue;
+        text=text.slice(0,m.index)+text.slice(end);
+        boundary=m.index;
+    }
+    return text.trimEnd();
+}
+function replaceField(text,f,block){
+    const ranges=fieldRanges(text,f);
+    if(!ranges.length)return text.trimEnd()+'\n\n'+block;
+    let result=text;
+    for(let i=ranges.length-1;i>=0;i--){
+        const m=ranges[i];
+        result=result.slice(0,m.index)+(i===0?block:'')+result.slice(m.index+m[0].length);
+    }
+    return result;
+}
 function fieldSignature(p){
     return JSON.stringify(p.fields.map(f=>[f.id,f.tag,f.item]));
 }
@@ -390,6 +439,7 @@ function render(){
     for(const body of document.querySelectorAll('#chat .mes[mesid] .mes_text')){
         const i=Number(body.closest('.mes[mesid]')?.getAttribute('mesid'));
         const m=messages[i];
+        if(body.querySelector('textarea'))continue;
         syncMarkers(body,m,active&&p.hide,tags,signature);
         const existing=body.querySelector(':scope > .vz-root');
         if(!active||i<start||!m||m.is_user||m.is_system||!Object.keys(parsedMessage(m,p,signature)).length){
@@ -425,7 +475,7 @@ function openDialog(d){d.addEventListener('click',e=>e.stopPropagation());try{d.
 function pencil(fn){return iconButton('pencil','Редактировать поле',fn)}
 function fieldHeading(label,fn){const h=node('div','vz-field-heading');h.append(node('span','',label),pencil(fn));return h}
 function roleplayGenerating(){const stop=document.getElementById('mes_stop');return !!stop&&getComputedStyle(stop).display!=='none'&&stop.getClientRects().length>0}
-function editField(i,f,state,name){const c=C(),m=c.chat[i];if(!m)return;const chat=scope(),original=m.mes,swipe=m.swipe_id,p=profile(),fieldSignature=JSON.stringify(f);document.querySelector('.vz-modal')?.remove();const d=node('dialog','vz-modal vz-editor');const h=node('div','vz-head');h.append(node('strong','',f.name+(name?' · '+name:'')),button('×',()=>d.close()));d.append(h);const note=node('p','vz-editor-note','Изменяется только служебная метка этого поста. Ролевой текст остаётся прежним.');d.append(note);const existing=f.item?state[f.id]?.[name]:state[f.id];let nameInput;if(f.item&&!name){nameInput=node('input');nameInput.placeholder='Имя персонажа или записи';d.append(nameInput)}const input=node('textarea');input.value=existing??'';input.rows=6;input.setAttribute('aria-label',f.name);d.append(input);const footer=node('div','vz-editor-actions');const submit=button('Сохранить',async()=>{if(scope()!==chat||C().chat[i]!==m||m.mes!==original||m.swipe_id!==swipe||profile()!==p||JSON.stringify(f)!==fieldSignature){window.toastr?.warning?.('Пост или настройки изменились. Открой редактор заново.');return}if(i===C().chat.length-1&&roleplayGenerating()){window.toastr?.warning?.('Этот пост ещё генерируется. Сохрани изменения после завершения.');return}const value=input.value.replace(/[\r\n]+/g,' ').trim();const n=name??nameInput?.value.trim();if(/[⟦⟧]/.test(value)||(f.item&&(!n||/[\r\n⟦⟧]/.test(n)))){window.toastr?.error?.('Проверь имя и текст: служебные скобки недопустимы.');return}const own=parse(original,p);let v=value;if(f.item){v={...(f.mode==='event'?own[f.id]:state[f.id]),[n]:value}}const block=f.item?'⟦'+f.tag+'⟧\n'+Object.entries(v).map(([k,t])=>'⟦'+f.item+':'+k+'⟧ '+t).join('\n')+'\n⟦/'+f.tag+'⟧':'⟦'+f.tag+'⟧ '+v;const pattern=f.item?'^⟦'+rx(f.tag)+'⟧[ \\t]*\\r?\\n[\\s\\S]*?^⟦/'+rx(f.tag)+'⟧[ \\t]*$':'^⟦'+rx(f.tag)+'⟧[^\\r\\n]*$';const re=new RegExp(pattern,'m');const next=re.test(original)?original.replace(re,()=>block):original.trimEnd()+'\n\n'+block;submit.disabled=true;if(busy)controller?.abort();try{m.mes=next;if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=next;if(!c.saveChat)throw Error('SillyTavern saveChat недоступен');await c.saveChat();if(scope()===chat&&C().chat[i]===m){c.updateMessageBlock?.(i,m);refresh()}d.close()}catch(err){m.mes=original;if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=original;submit.disabled=false;window.toastr?.error?.(String(err.message??err));console.error('[Visualizer]',err)}});footer.append(button('Отмена',()=>d.close()),submit);d.append(footer);d.onclose=()=>d.remove();document.body.append(d);openDialog(d);input.focus()}
+function editField(i,f,state,name){const c=C(),m=c.chat[i];if(!m)return;const chat=scope(),original=m.mes,swipe=m.swipe_id,p=profile(),fieldSignature=JSON.stringify(f);document.querySelector('.vz-modal')?.remove();const d=node('dialog','vz-modal vz-editor');const h=node('div','vz-head');h.append(node('strong','',f.name+(name?' · '+name:'')),button('×',()=>d.close()));d.append(h);const note=node('p','vz-editor-note','Изменяется только служебная метка этого поста. Ролевой текст остаётся прежним.');d.append(note);state=snapshot(i,p);const existing=f.item?state[f.id]?.[name]:state[f.id];let nameInput;if(f.item&&!name){nameInput=node('input');nameInput.placeholder='Имя персонажа или записи';d.append(nameInput)}const input=node('textarea');input.value=existing??'';input.rows=6;input.setAttribute('aria-label',f.name);d.append(input);const footer=node('div','vz-editor-actions');const submit=button('Сохранить',async()=>{if(scope()!==chat||C().chat[i]!==m||m.mes!==original||m.swipe_id!==swipe||profile()!==p||JSON.stringify(f)!==fieldSignature){window.toastr?.warning?.('Пост или настройки изменились. Открой редактор заново.');return}if(i===C().chat.length-1&&roleplayGenerating()){window.toastr?.warning?.('Этот пост ещё генерируется. Сохрани изменения после завершения.');return}const value=input.value.replace(/[\r\n]+/g,' ').trim();const n=name??nameInput?.value.trim();if(/[⟦⟧]/.test(value)||(f.item&&(!n||/[\r\n⟦⟧]/.test(n)))){window.toastr?.error?.('Проверь имя и текст: служебные скобки недопустимы.');return}const own=parse(original,p);let v=value;if(f.item){v={...(f.mode==='event'?own[f.id]:state[f.id]),[n]:value}}const block=f.item?'⟦'+f.tag+'⟧\n'+Object.entries(v).map(([k,t])=>'⟦'+f.item+':'+k+'⟧ '+t).join('\n')+'\n⟦/'+f.tag+'⟧':'⟦'+f.tag+'⟧ '+v;const next=replaceField(original,f,block);submit.disabled=true;if(busy)controller?.abort();try{m.mes=next;if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=next;if(!c.saveChat)throw Error('SillyTavern saveChat недоступен');await c.saveChat();if(scope()===chat&&C().chat[i]===m){c.updateMessageBlock?.(i,m);refresh()}d.close()}catch(err){m.mes=original;if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=original;submit.disabled=false;window.toastr?.error?.(String(err.message??err));console.error('[Visualizer]',err)}});footer.append(button('Отмена',()=>d.close()),submit);d.append(footer);d.onclose=()=>d.remove();document.body.append(d);openDialog(d);input.focus()}
 function notify(message,error=false){
     const toast=window.toastr;
     if(toast&&typeof toast[error?'error':'success']==='function')toast[error?'error':'success'](message);
@@ -536,6 +586,14 @@ const b=section('Подключение и метки');const together=add(b,'О
 const d=section('Поля и промпты');for(const f of p.fields){const card=node('div','vz-field');add(card,'Активно','on',f,'check','Отключает поле без удаления.');add(card,'Название','name',f,'text','Название вкладки. Например: Предметы.');add(card,'Метка блока','tag',f,'text','Например: ПРЕДМЕТЫ. Без скобок.');add(card,'Метка записи','item',f,'text','Например: ПРЕДМЕТ. Пусто — единая строка.');const mode=node('select');for(const [v,t] of [['fresh','↻ Новый снимок'],['persist','↔ Полное состояние'],['event','+ Только изменения']]){const o=node('option','',t);o.value=v;o.selected=f.mode===v;mode.append(o)}mode.onchange=()=>{f.mode=mode.value;save();refresh()};card.append(mode,button('?',()=>alert('Новый снимок — актуальные позы. Полное состояние — сохраняй одежду до изменения. Только изменения — регистрация NPC.')));add(card,'Промпт','prompt',f,'textarea','Опиши только видимые свойства, например: Track visible held objects.');if(!['scene','wear','npc'].includes(f.id))card.append(button('Удалить',()=>{if(confirm('Удалить поле?')){p.fields=p.fields.filter(x=>x!==f);save();dialog.close();settings();refresh()}}));d.append(card)}d.append(button('+ Добавить поле',()=>{p.fields.push({id:crypto.randomUUID(),name:'Новое поле',tag:'ПОЛЕ_'+p.fields.length,item:'ЗАПИСЬ',mode:'fresh',on:true,prompt:'Track only established visible details.'});save();dialog.close();settings();refresh()}));dialog.append(button('Готово',()=>dialog.close()));dialog.onclose=()=>dialog.remove();document.body.append(dialog);openDialog(dialog)}
 async function separate(){const c=C(),p=profile();if(busy||!enabled()||(p.provider==='active'&&p.together)||!p.write)return;const i=c.chat.length-1,m=c.chat[i];if(!m||m.is_user||m.is_system||Object.keys(parse(m.mes,p)).length)return;const s=scope(),original=m.mes,swipe=m.swipe_id;busy=true;const request=new AbortController();controller=request;try{const prompt=instruction(p,recentSnapshots(i-1,p))+'\nReturn ONLY metadata for this completed scene. The two most recent roleplay posts, oldest to newest:\n'+JSON.stringify(recentPosts(i,p));let result;if(p.provider==='connection'){result=await requestViaProfile(p,prompt,request.signal)}else if(p.provider==='direct'){const response=await fetch(p.endpoint,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(sessionStorage.getItem('vz-key')??'')},body:JSON.stringify({model:p.model,messages:[{role:'user',content:prompt}]}),signal:request.signal});if(!response.ok)throw Error('HTTP '+response.status);result=(await response.json()).choices[0].message.content}else{if(!c.generateQuietPrompt)throw Error('Active connection unavailable');result=await c.generateQuietPrompt({quietPrompt:prompt})}if(request.signal.aborted||!enabled()||scope()!==s||profile()!==p||C().chat[i]!==m||m.mes!==original||m.swipe_id!==swipe)return;const parsed=parse(result,p),blocks=[];for(const f of p.fields.filter(x=>x.on)){const v=parsed[f.id];if(v===undefined)continue;blocks.push(f.item?'⟦'+f.tag+'⟧\n'+Object.entries(v).map(([n,t])=>'⟦'+f.item+':'+n+'⟧ '+t).join('\n')+'\n⟦/'+f.tag+'⟧':'⟦'+f.tag+'⟧ '+v)}if(!blocks.length)throw Error('No valid metadata');m.mes=original.trimEnd()+'\n\n'+blocks.join('\n');if(m.swipes&&m.swipe_id!=null)m.swipes[m.swipe_id]=m.mes;await c.saveChat?.();c.updateMessageBlock?.(i,m);refresh()}catch(e){if(!request.signal.aborted&&e.name!=='AbortError'){console.warn('[Visualizer]',e);notify(String(e.message??e),true)}}finally{busy=false;controller=null}}
 function syncMenu(){const check=document.getElementById('vz-chat-enabled');if(check){check.checked=enabled();check.disabled=typeof C().getCurrentChatId==='function'&&!C().getCurrentChatId();}}
-function init(){const c=C();store();const menu=document.querySelector('#extensions_settings2')??document.querySelector('#extensions_settings');if(menu&&!document.getElementById('vz-menu')){const panel=node('div','vz-menu inline-drawer');panel.id='vz-menu';const head=node('div','inline-drawer-toggle inline-drawer-header');head.tabIndex=0;head.setAttribute('role','button');head.setAttribute('aria-expanded','false');head.append(node('b','','◉ Визуализатор'),node('div','inline-drawer-icon fa-solid fa-circle-chevron-down down'));const content=node('div','vz-menu-content');content.hidden=true;const toggle=()=>{content.hidden=!content.hidden;head.setAttribute('aria-expanded',String(!content.hidden));const icon=head.lastElementChild;icon.classList.toggle('fa-circle-chevron-down',content.hidden);icon.classList.toggle('fa-circle-chevron-up',!content.hidden)};head.addEventListener('click',e=>{e.stopPropagation();toggle()});head.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle()}});const label=node('label','vz-menu-check');const check=node('input');check.type='checkbox';check.id='vz-chat-enabled';check.onchange=()=>{meta().enabled=check.checked;if(!check.checked)controller?.abort();save();refresh()};label.append(check,node('span','','Включить в этом чате'));const b=button('⚙ Настройки',settings);b.className='menu_button vz-menu-settings';b.id='vz-settings-button';content.append(label,b);panel.append(head,content);menu.append(panel);syncMenu()}const bus=c.eventSource,types=c.eventTypes??c.event_types;for(const name of ['CHAT_CHANGED','MESSAGE_EDITED','MESSAGE_UPDATED','MESSAGE_SWIPED','MESSAGE_DELETED','CHARACTER_MESSAGE_RENDERED','GENERATION_STARTED','GENERATION_ENDED','GENERATION_STOPPED']){if(!types?.[name])continue;bus.on(types[name],(type,options,dryRun)=>{if(name==='CHAT_CHANGED'){controller?.abort();selected.clear();document.querySelector('.vz-modal')?.close();running=false}if(name==='GENERATION_STARTED'){if(busy||dryRun||type==='quiet'||type==='impersonate')return;running=true;inject();return}const finished=name==='GENERATION_ENDED'||name==='GENERATION_STOPPED';const wasRunning=running;if(finished)running=false;if(!running||!roleplayGenerating())refresh();if(name==='GENERATION_ENDED'&&wasRunning&&!busy)void separate()})}refresh()}
+function init(){const c=C();store();const menu=document.querySelector('#extensions_settings2')??document.querySelector('#extensions_settings');if(menu&&!document.getElementById('vz-menu')){const panel=node('div','vz-menu inline-drawer');panel.id='vz-menu';const head=node('div','inline-drawer-toggle inline-drawer-header');head.tabIndex=0;head.setAttribute('role','button');head.setAttribute('aria-expanded','false');head.append(node('b','','◉ Визуализатор'),node('div','inline-drawer-icon fa-solid fa-circle-chevron-down down'));const content=node('div','vz-menu-content');content.hidden=true;const toggle=()=>{content.hidden=!content.hidden;head.setAttribute('aria-expanded',String(!content.hidden));const icon=head.lastElementChild;icon.classList.toggle('fa-circle-chevron-down',content.hidden);icon.classList.toggle('fa-circle-chevron-up',!content.hidden)};head.addEventListener('click',e=>{e.stopPropagation();toggle()});head.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle()}});const label=node('label','vz-menu-check');const check=node('input');check.type='checkbox';check.id='vz-chat-enabled';check.onchange=()=>{meta().enabled=check.checked;if(!check.checked)controller?.abort();save();refresh()};label.append(check,node('span','','Включить в этом чате'));const b=button('⚙ Настройки',settings);b.className='menu_button vz-menu-settings';b.id='vz-settings-button';content.append(label,b);panel.append(head,content);menu.append(panel);syncMenu()}const bus=c.eventSource,types=c.eventTypes??c.event_types;for(const name of ['CHAT_CHANGED','MESSAGE_EDITED','MESSAGE_UPDATED','MESSAGE_SWIPED','MESSAGE_DELETED','CHARACTER_MESSAGE_RENDERED','GENERATION_STARTED','GENERATION_ENDED','GENERATION_STOPPED']){if(!types?.[name])continue;bus.on(types[name],(type,options,dryRun)=>{if(name==='CHAT_CHANGED'){controller?.abort();selected.clear();document.querySelector('.vz-modal')?.close();running=false}if(name==='MESSAGE_EDITED'){
+    const id=Number(type),m=C().chat[id];
+    if(m)cached.delete(m);
+    if(busy)controller?.abort();
+    // SillyTavern is still replacing the editor DOM; MESSAGE_UPDATED follows.
+    return;
+}if(name==='MESSAGE_UPDATED'||name==='MESSAGE_SWIPED'||name==='MESSAGE_DELETED'||name==='CHARACTER_MESSAGE_RENDERED'||name==='CHAT_CHANGED'){
+    refresh();return;
+}if(name==='GENERATION_STARTED'){if(busy||dryRun||type==='quiet'||type==='impersonate')return;running=true;inject();return}const finished=name==='GENERATION_ENDED'||name==='GENERATION_STOPPED';const wasRunning=running;if(finished)running=false;if(!running||!roleplayGenerating())refresh();if(name==='GENERATION_ENDED'&&wasRunning&&!busy)void separate()})}refresh()}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
